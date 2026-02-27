@@ -1,4 +1,4 @@
-/**
+/** 
  * service.js — yekrial.com → Google Sheets (Render-ready, ESM)
  *
  * What it does:
