@@ -14,7 +14,7 @@
  *   PORT
  *   WORKSHEET_TITLE
  *   CACHE_TTL_MS
- *   CRON                 (default: "*/10 * * * *")
+ *   CRON                 (default: "every 10 minutes")
  *   YEKRIAL_URL           (default: "https://yekrial.com")
  *   YEKRIAL_HEADLESS      ("1" or "0", default "1")
  *   YEKRIAL_WAIT_MS       (default: 20000)
