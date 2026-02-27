@@ -45,7 +45,7 @@ const WORKSHEET_TITLE = process.env.WORKSHEET_TITLE || "Rates";
 const SA_B64 = process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 || "";
 
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 60_000);
-const CRON_EXPR = process.env.CRON || "*/10 * * * *";
+const CRON_EXPR = process.env.CRON || "every 10 minutes";
 
 const YEKRIAL_URL = process.env.YEKRIAL_URL || "https://yekrial.com";
 const YEKRIAL_HEADLESS = String(process.env.YEKRIAL_HEADLESS || "1") === "1";
