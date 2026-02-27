@@ -1,0 +1,20 @@
+{
+  "name": "yekrial-to-sheets",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "service.js",
+  "scripts": {
+    "start": "node service.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "google-auth-library": "^9.13.0",
+    "google-spreadsheet": "^4.1.2",
+    "node-cron": "^3.0.3",
+    "playwright": "^1.50.0"
+  }
+}
