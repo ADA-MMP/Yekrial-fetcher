@@ -1,9 +1,10 @@
-/** 
+/**
  * service.js — yekrial.com → Google Sheets (Render-ready, ESM)
  *
  * What it does:
  * - Loads https://yekrial.com in a headless browser (Playwright)
  * - Extracts ALL rate cards from DOM: a.currency-card-link (symbol from href)
+ * - Picks the correct PRICE from cards (prefers comma-formatted, else max numeric)
  * - Writes rows into Google Sheets (service account via JWT)
  *
  * ENV required (Render → Environment Variables):
@@ -14,11 +15,11 @@
  *   PORT
  *   WORKSHEET_TITLE
  *   CACHE_TTL_MS
- *   CRON                 (default: every 10 minutes)
- *   YEKRIAL_URL           (default: "https://yekrial.com")
- *   YEKRIAL_HEADLESS      ("1" or "0", default "1")
- *   YEKRIAL_WAIT_MS       (default: 20000)
- *   YEKRIAL_RENDER_WAIT_MS(default: 1800)
+ *   CRON                   (default: */10 * * * *)
+ *   YEKRIAL_URL             (default: https://yekrial.com)
+ *   YEKRIAL_HEADLESS        ("1" or "0", default "1")
+ *   YEKRIAL_WAIT_MS         (default: 20000)
+ *   YEKRIAL_RENDER_WAIT_MS  (default: 1800)
  *
  * Routes:
  *   GET /
@@ -74,12 +75,12 @@ function num(v) {
 
 // Symbol classification (future-proof for crypto/metals if added later)
 const CRYPTO_SYMBOLS = new Set([
-  "BTC","ETH","USDT","BNB","XRP","ADA","DOGE","SOL","DOT",
-  "TRX","LTC","BCH","TON","AVAX","LINK","MATIC","SHIB","ATOM",
-  "ETC","XLM","EOS","XAUT"
+  "BTC", "ETH", "USDT", "BNB", "XRP", "ADA", "DOGE", "SOL", "DOT",
+  "TRX", "LTC", "BCH", "TON", "AVAX", "LINK", "MATIC", "SHIB", "ATOM",
+  "ETC", "XLM", "EOS", "XAUT",
 ]);
 
-const METAL_SYMBOLS = new Set(["XAU","XAG","GOLD","SILVER"]);
+const METAL_SYMBOLS = new Set(["XAU", "XAG", "GOLD", "SILVER"]);
 
 // -----------------------------
 // Google Sheets auth + write
@@ -121,29 +122,12 @@ async function getSheet() {
   const creds = loadServiceAccountFromEnv();
   const auth = makeJwtAuth(creds);
 
-  // google-spreadsheet v4+ supports passing auth directly
   const doc = new GoogleSpreadsheet(SHEET_ID, auth);
   await doc.loadInfo();
 
   const sheet = doc.sheetsByTitle[WORKSHEET_TITLE] || doc.sheetsByIndex[0];
   if (!sheet) throw new Error("Worksheet not found");
   return sheet;
-}
-
-async function ensureHeaders(sheet, wantedHeaders) {
-  try {
-    await sheet.loadHeaderRow();
-  } catch {
-    // ignore
-  }
-
-  const hasHeaders =
-    Array.isArray(sheet.headerValues) && sheet.headerValues.length > 0;
-
-  if (!hasHeaders) {
-    await sheet.setHeaderRow(wantedHeaders);
-    await sheet.loadHeaderRow();
-  }
 }
 
 async function writeRowsToSheet(rows) {
@@ -162,14 +146,11 @@ async function writeRowsToSheet(rows) {
     "updated_at",
   ];
 
-  // 1) Clear everything (this also removes header row)
+  // Clear EVERYTHING (including headers), then recreate headers reliably
   await sheet.clear();
-
-  // 2) Recreate header row and FORCE load it
   await sheet.setHeaderRow(wantedHeaders);
   await sheet.loadHeaderRow();
 
-  // 3) Now add rows safely
   const updated_at = new Date().toISOString();
   const finalRows = rows.map((r) => ({ ...r, updated_at }));
 
@@ -185,9 +166,7 @@ async function writeRowsToSheet(rows) {
 // -----------------------------
 async function fetchYekRialRows() {
   const browser = await chromium.launch({ headless: YEKRIAL_HEADLESS });
-  const page = await browser.newPage({
-    userAgent: "yekrial-to-sheets/1.0",
-  });
+  const page = await browser.newPage({ userAgent: "yekrial-to-sheets/1.0" });
 
   try {
     await page.goto(YEKRIAL_URL, {
@@ -200,57 +179,49 @@ async function fetchYekRialRows() {
 
     const extracted = await page.evaluate(() => {
       const results = [];
-
       const cards = document.querySelectorAll("a.currency-card-link");
+
       cards.forEach((card) => {
         const href = card.getAttribute("href") || "";
         const text = (card.innerText || "").trim();
         if (!href || !text) return;
 
-        // Extract symbol from href:
-        // e.g. "/toman-rate/USD" (future: "/toman-rate/BTC")
+        // Symbol from href: /toman-rate/USD (future: /toman-rate/BTC)
         const codeMatch = href.match(/\/toman-rate\/([A-Z0-9_-]{2,15})/i);
         if (!codeMatch) return;
-
         const symbol = String(codeMatch[1]).toUpperCase();
 
-        // Extract price:
-        // Supports "166,340" and also plain numbers, optionally decimals
-        const nums = Array.from(text.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?/g))
-  .map(m => m[0]);
+        // Collect all numeric strings from card text
+        const nums = Array.from(
+          text.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?/g)
+        ).map((m) => m[0]);
 
-// Prefer comma-formatted number (typical price like 166,340)
-let priceText = nums.find(s => s.includes(",")) || "";
+        // Prefer comma-formatted number (typical price like 166,340)
+        let priceText = nums.find((s) => s.includes(",")) || "";
 
-// If no commas, take the largest numeric value on the card
-if (!priceText && nums.length) {
-  priceText = nums
-    .map(s => ({ s, n: Number(s.replace(/,/g, "")) }))
-    .filter(x => Number.isFinite(x.n))
-    .sort((a,b) => b.n - a.n)[0]?.s || "";
-}
+        // If no comma numbers, take the largest numeric value
+        if (!priceText && nums.length) {
+          priceText =
+            nums
+              .map((s) => ({ s, n: Number(s.replace(/,/g, "")) }))
+              .filter((x) => Number.isFinite(x.n))
+              .sort((a, b) => b.n - a.n)[0]?.s || "";
+        }
 
-if (!priceText) return;
+        if (!priceText) return;
 
-const price = Number(priceText.replace(/,/g, ""));
-if (!Number.isFinite(price)) return;
+        const price = Number(priceText.replace(/,/g, ""));
+        if (!Number.isFinite(price)) return;
 
-        // Persian name:
-        // Take first Persian chunk found
+        // Persian name: first Persian chunk
         const faMatch = text.match(/[\u0600-\u06FF][\u0600-\u06FF\s‌]{2,}/);
         const name_fa = faMatch ? faMatch[0].trim() : symbol;
 
-        // Change percent if present (optional)
-        // e.g. "+0.42%" or "-0.12%"
+        // Change percent if present (optional): "+0.42%" or "-0.12%"
         const changeMatch = text.match(/[-+]\s*\d+(?:\.\d+)?\s*%/);
-        const change = changeMatch ? changeMatch[0].replace(/\s+/g, "") : null;
+        const change = changeMatch ? changeMatch[0].replace(/\s+/g, "") : "0";
 
-        results.push({
-          symbol,
-          name_fa,
-          priceText: priceMatch[0],
-          change,
-        });
+        results.push({ symbol, name_fa, price, change });
       });
 
       // De-dup by symbol (keep first)
@@ -271,8 +242,7 @@ if (!Number.isFinite(price)) return;
     const rows = extracted
       .map((x) => {
         const symbol = String(x.symbol || "").toUpperCase();
-        const price = num(x.priceText);
-
+        const price = typeof x.price === "number" ? x.price : num(x.price);
         if (!symbol || price === null) return null;
 
         let group = "fiat";
@@ -294,10 +264,10 @@ if (!Number.isFinite(price)) return;
       .filter(Boolean);
 
     if (!rows.length) {
-      throw new Error("Cards found, but no valid rows parsed (price/symbol issue)");
+      throw new Error("Cards found, but no valid rows parsed");
     }
 
-    // Optional: stable ordering
+    // Stable ordering
     const groupOrder = { fiat: 1, metal: 2, crypto: 3, unknown: 9 };
     rows.sort(
       (a, b) =>
