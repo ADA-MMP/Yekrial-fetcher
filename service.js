@@ -216,10 +216,24 @@ async function fetchYekRialRows() {
 
         // Extract price:
         // Supports "166,340" and also plain numbers, optionally decimals
-        const priceMatch = text.match(
-          /\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b|\b\d+(?:\.\d+)?\b/
-        );
-        if (!priceMatch) return;
+        const nums = Array.from(text.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?/g))
+  .map(m => m[0]);
+
+// Prefer comma-formatted number (typical price like 166,340)
+let priceText = nums.find(s => s.includes(",")) || "";
+
+// If no commas, take the largest numeric value on the card
+if (!priceText && nums.length) {
+  priceText = nums
+    .map(s => ({ s, n: Number(s.replace(/,/g, "")) }))
+    .filter(x => Number.isFinite(x.n))
+    .sort((a,b) => b.n - a.n)[0]?.s || "";
+}
+
+if (!priceText) return;
+
+const price = Number(priceText.replace(/,/g, ""));
+if (!Number.isFinite(price)) return;
 
         // Persian name:
         // Take first Persian chunk found
