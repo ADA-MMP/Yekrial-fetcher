@@ -2,7 +2,7 @@
 /**
  * service.js — yekrial.com → Google Sheets
  * Cron schedule is configured via ENV var CRON (default: every 10 minutes).
- */
+ 
  * service.js — yekrial.com → Google Sheets (Render-ready, ESM)
  *
  * What it does:
