@@ -162,11 +162,14 @@ async function writeRowsToSheet(rows) {
     "updated_at",
   ];
 
-  await ensureHeaders(sheet, wantedHeaders);
-
-  // ✅ single clear call (avoid per-row deletes → quota-friendly)
+  // 1) Clear everything (this also removes header row)
   await sheet.clear();
 
+  // 2) Recreate header row and FORCE load it
+  await sheet.setHeaderRow(wantedHeaders);
+  await sheet.loadHeaderRow();
+
+  // 3) Now add rows safely
   const updated_at = new Date().toISOString();
   const finalRows = rows.map((r) => ({ ...r, updated_at }));
 
