@@ -1,35 +1,28 @@
-
-/**
- * service.js — yekrial.com → Google Sheets
- * Cron schedule is configured via ENV var CRON (default: every 10 minutes).
- 
- * service.js — yekrial.com → Google Sheets (Render-ready, ESM)
- *
- * What it does:
- * - Loads https://yekrial.com in a headless browser (Playwright)
- * - Extracts ALL rate cards from DOM: a.currency-card-link (symbol from href)
- * - Picks the correct PRICE from cards (prefers comma-formatted, else max numeric)
- * - Writes rows into Google Sheets (service account via JWT)
- *
- * ENV required (Render → Environment Variables):
- *   SHEET_ID
- *   GOOGLE_SERVICE_ACCOUNT_JSON_BASE64
- *
- * Optional:
- *   PORT
- *   WORKSHEET_TITLE
- *   CACHE_TTL_MS
- *   CRON                   (default: every 10 minutes)
- *   YEKRIAL_URL             (default: https://yekrial.com)
- *   YEKRIAL_HEADLESS        ("1" or "0", default "1")
- *   YEKRIAL_WAIT_MS         (default: 20000)
- *   YEKRIAL_RENDER_WAIT_MS  (default: 1800)
- *
- * Routes:
- *   GET /
- *   GET /health
- *   GET /run?force=1
- */
+// service.js — yekrial.com → Google Sheets (Render-ready, ESM)
+//
+// Notes:
+// - Uses Playwright to load yekrial.com and scrape rendered DOM cards.
+// - Writes a snapshot into Google Sheets using a Service Account (JWT).
+// - IMPORTANT: Do NOT put cron strings like "*/10 * * * *" inside /* ... */ comments (it breaks JS).
+//
+// ENV required (Render):
+//   SHEET_ID
+//   GOOGLE_SERVICE_ACCOUNT_JSON_BASE64
+//
+// Optional:
+//   PORT (default 3000)
+//   WORKSHEET_TITLE (default "YekRial")
+//   CACHE_TTL_MS (default 60000)
+//   CRON (default "*/10 * * * *")
+//   YEKRIAL_URL (default "https://yekrial.com")
+//   YEKRIAL_HEADLESS ("1" or "0", default "1")
+//   YEKRIAL_WAIT_MS (default 20000)
+//   YEKRIAL_RENDER_WAIT_MS (default 1800)
+//
+// Routes:
+//   GET /
+//   GET /health
+//   GET /run?force=1
 
 import "dotenv/config";
 import express from "express";
@@ -77,7 +70,6 @@ function num(v) {
   return Number.isFinite(n) ? n : null;
 }
 
-// Symbol classification (future-proof for crypto/metals if added later)
 const CRYPTO_SYMBOLS = new Set([
   "BTC", "ETH", "USDT", "BNB", "XRP", "ADA", "DOGE", "SOL", "DOT",
   "TRX", "LTC", "BCH", "TON", "AVAX", "LINK", "MATIC", "SHIB", "ATOM",
@@ -150,7 +142,7 @@ async function writeRowsToSheet(rows) {
     "updated_at",
   ];
 
-  // Clear EVERYTHING (including headers), then recreate headers reliably
+  // Clear ALL (including header), then recreate header reliably.
   await sheet.clear();
   await sheet.setHeaderRow(wantedHeaders);
   await sheet.loadHeaderRow();
@@ -166,7 +158,7 @@ async function writeRowsToSheet(rows) {
 }
 
 // -----------------------------
-// YekRial scraper (DOM-based, stable)
+// YekRial scraper (Playwright DOM)
 // -----------------------------
 async function fetchYekRialRows() {
   const browser = await chromium.launch({ headless: YEKRIAL_HEADLESS });
@@ -190,20 +182,19 @@ async function fetchYekRialRows() {
         const text = (card.innerText || "").trim();
         if (!href || !text) return;
 
-        // Symbol from href: /toman-rate/USD (future: /toman-rate/BTC)
+        // Symbol from href: /toman-rate/USD
         const codeMatch = href.match(/\/toman-rate\/([A-Z0-9_-]{2,15})/i);
         if (!codeMatch) return;
         const symbol = String(codeMatch[1]).toUpperCase();
 
-        // Collect all numeric strings from card text
+        // Collect all numbers in the card, choose best price:
+        // 1) prefer comma-formatted number like 166,340
+        // 2) otherwise take the largest numeric value
         const nums = Array.from(
           text.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?/g)
         ).map((m) => m[0]);
 
-        // Prefer comma-formatted number (typical price like 166,340)
         let priceText = nums.find((s) => s.includes(",")) || "";
-
-        // If no comma numbers, take the largest numeric value
         if (!priceText && nums.length) {
           priceText =
             nums
@@ -211,7 +202,6 @@ async function fetchYekRialRows() {
               .filter((x) => Number.isFinite(x.n))
               .sort((a, b) => b.n - a.n)[0]?.s || "";
         }
-
         if (!priceText) return;
 
         const price = Number(priceText.replace(/,/g, ""));
@@ -221,7 +211,7 @@ async function fetchYekRialRows() {
         const faMatch = text.match(/[\u0600-\u06FF][\u0600-\u06FF\s‌]{2,}/);
         const name_fa = faMatch ? faMatch[0].trim() : symbol;
 
-        // Change percent if present (optional): "+0.42%" or "-0.12%"
+        // Change percent if present: +0.42% / -0.12%
         const changeMatch = text.match(/[-+]\s*\d+(?:\.\d+)?\s*%/);
         const change = changeMatch ? changeMatch[0].replace(/\s+/g, "") : "0";
 
@@ -371,5 +361,5 @@ cron.schedule(CRON_EXPR, async () => {
 // -----------------------------
 app.listen(PORT, () => {
   console.log(`yekrial-to-sheets running on port ${PORT}`);
-  console.log(`Manual run: /run?force=1`);
+  console.log("Manual run: /run?force=1");
 });
