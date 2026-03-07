@@ -162,34 +162,44 @@ async function writeRowsToSheet(rows) {
 // -----------------------------
 async function fetchYekRialRows() {
   const browser = await chromium.launch({ headless: YEKRIAL_HEADLESS });
-  const page = await browser.newPage({ userAgent: "yekrial-to-sheets/1.0" });
+  const page = await browser.newPage({
+    userAgent:
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+  });
 
   try {
     await page.goto(YEKRIAL_URL, {
-      waitUntil: "networkidle",
+      waitUntil: "domcontentloaded",
       timeout: YEKRIAL_WAIT_MS,
     });
 
-    // Let Blazor finish rendering cards
-    await page.waitForTimeout(YEKRIAL_RENDER_WAIT_MS);
+    // give the page extra time to render
+    await page.waitForTimeout(Math.max(YEKRIAL_RENDER_WAIT_MS, 4000));
+
+    // optional extra scroll to trigger lazy rendering
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await page.waitForTimeout(1500);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.waitForTimeout(1000);
 
     const extracted = await page.evaluate(() => {
       const results = [];
-      const cards = document.querySelectorAll("a.currency-card-link");
 
-      cards.forEach((card) => {
+      // try several selectors
+      const cardNodes = [
+        ...document.querySelectorAll("a.currency-card-link"),
+        ...document.querySelectorAll("a[href*='/toman-rate/']"),
+      ];
+
+      cardNodes.forEach((card) => {
         const href = card.getAttribute("href") || "";
-        const text = (card.innerText || "").trim();
+        const text = (card.innerText || card.textContent || "").trim();
         if (!href || !text) return;
 
-        // Symbol from href: /toman-rate/USD
         const codeMatch = href.match(/\/toman-rate\/([A-Z0-9_-]{2,15})/i);
         if (!codeMatch) return;
         const symbol = String(codeMatch[1]).toUpperCase();
 
-        // Collect all numbers in the card, choose best price:
-        // 1) prefer comma-formatted number like 166,340
-        // 2) otherwise take the largest numeric value
         const nums = Array.from(
           text.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?/g)
         ).map((m) => m[0]);
@@ -202,23 +212,21 @@ async function fetchYekRialRows() {
               .filter((x) => Number.isFinite(x.n))
               .sort((a, b) => b.n - a.n)[0]?.s || "";
         }
+
         if (!priceText) return;
 
         const price = Number(priceText.replace(/,/g, ""));
         if (!Number.isFinite(price)) return;
 
-        // Persian name: first Persian chunk
         const faMatch = text.match(/[\u0600-\u06FF][\u0600-\u06FF\s‌]{2,}/);
         const name_fa = faMatch ? faMatch[0].trim() : symbol;
 
-        // Change percent if present: +0.42% / -0.12%
         const changeMatch = text.match(/[-+]\s*\d+(?:\.\d+)?\s*%/);
         const change = changeMatch ? changeMatch[0].replace(/\s+/g, "") : "0";
 
         results.push({ symbol, name_fa, price, change });
       });
 
-      // De-dup by symbol (keep first)
       const seen = new Set();
       return results.filter((r) => {
         if (seen.has(r.symbol)) return false;
@@ -228,7 +236,18 @@ async function fetchYekRialRows() {
     });
 
     if (!extracted.length) {
-      throw new Error("No currency cards found using selector: a.currency-card-link");
+      const debug = await page.evaluate(() => ({
+        title: document.title,
+        bodyText: (document.body?.innerText || "").slice(0, 2000),
+        links: Array.from(document.querySelectorAll("a"))
+          .map((a) => a.getAttribute("href"))
+          .filter(Boolean)
+          .slice(0, 50),
+      }));
+
+      throw new Error(
+        `No currency cards found. Title: ${debug.title}. Sample body: ${debug.bodyText}`
+      );
     }
 
     const ts = new Date().toISOString();
@@ -261,7 +280,6 @@ async function fetchYekRialRows() {
       throw new Error("Cards found, but no valid rows parsed");
     }
 
-    // Stable ordering
     const groupOrder = { fiat: 1, metal: 2, crypto: 3, unknown: 9 };
     rows.sort(
       (a, b) =>
@@ -275,7 +293,6 @@ async function fetchYekRialRows() {
     await browser.close().catch(() => {});
   }
 }
-
 // -----------------------------
 // Runner + cache
 // -----------------------------
