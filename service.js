@@ -1,32 +1,7 @@
-// service.js — yekrial.com → Google Sheets (Render-ready, ESM)
-//
-// Notes:
-// - Uses Playwright to load yekrial.com and scrape rendered DOM cards.
-// - Writes a snapshot into Google Sheets using a Service Account (JWT).
-// - IMPORTANT: Do NOT put cron strings like "*/10 * * * *" inside /* ... */ comments (it breaks JS).
-//
-// ENV required (Render):
-//   SHEET_ID
-//   GOOGLE_SERVICE_ACCOUNT_JSON_BASE64
-//
-// Optional:
-//   PORT (default 3000)
-//   WORKSHEET_TITLE (default "YekRial")
-//   CACHE_TTL_MS (default 60000)
-//   CRON (default "*/10 * * * *")
-//   YEKRIAL_URL (default "https://yekrial.com")
-//   YEKRIAL_HEADLESS ("1" or "0", default "1")
-//   YEKRIAL_WAIT_MS (default 20000)
-//   YEKRIAL_RENDER_WAIT_MS (default 1800)
-//
-// Routes:
-//   GET /
-//   GET /health
-//   GET /run?force=1
+// service.js — yekrial.com → Google Sheets (optimized for low usage on Railway)
 
 import "dotenv/config";
 import express from "express";
-import cron from "node-cron";
 import { chromium } from "playwright";
 import { GoogleSpreadsheet } from "google-spreadsheet";
 import { JWT } from "google-auth-library";
@@ -42,13 +17,15 @@ const SHEET_ID = process.env.SHEET_ID || "";
 const WORKSHEET_TITLE = process.env.WORKSHEET_TITLE || "YekRial";
 const SA_B64 = process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 || "";
 
-const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 60_000);
-const CRON_EXPR = process.env.CRON || "*/10 * * * *";
-
+const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 15 * 60_000); // default 15 min
 const YEKRIAL_URL = process.env.YEKRIAL_URL || "https://yekrial.com";
 const YEKRIAL_HEADLESS = String(process.env.YEKRIAL_HEADLESS || "1") === "1";
-const YEKRIAL_WAIT_MS = Number(process.env.YEKRIAL_WAIT_MS || 20_000);
-const YEKRIAL_RENDER_WAIT_MS = Number(process.env.YEKRIAL_RENDER_WAIT_MS || 1800);
+const YEKRIAL_WAIT_MS = Number(process.env.YEKRIAL_WAIT_MS || 30_000);
+const YEKRIAL_RENDER_WAIT_MS = Number(process.env.YEKRIAL_RENDER_WAIT_MS || 5_000);
+
+// if RUN_ONCE=1, app runs a single scrape/write and exits.
+// useful later if you want scheduled jobs instead of always-on server.
+const RUN_ONCE = String(process.env.RUN_ONCE || "0") === "1";
 
 // -----------------------------
 // Helpers
@@ -101,6 +78,7 @@ function loadServiceAccountFromEnv() {
   if (!creds.client_email || !creds.private_key) {
     throw new Error("Service account JSON missing client_email/private_key");
   }
+
   return creds;
 }
 
@@ -122,7 +100,8 @@ async function getSheet() {
   await doc.loadInfo();
 
   const sheet = doc.sheetsByTitle[WORKSHEET_TITLE] || doc.sheetsByIndex[0];
-  if (!sheet) throw new Error("Worksheet not found");
+  if (!sheet) throw new Error(`Worksheet not found: ${WORKSHEET_TITLE}`);
+
   return sheet;
 }
 
@@ -142,7 +121,6 @@ async function writeRowsToSheet(rows) {
     "updated_at",
   ];
 
-  // Clear ALL (including header), then recreate header reliably.
   await sheet.clear();
   await sheet.setHeaderRow(wantedHeaders);
   await sheet.loadHeaderRow();
@@ -158,13 +136,24 @@ async function writeRowsToSheet(rows) {
 }
 
 // -----------------------------
-// YekRial scraper (Playwright DOM)
+// Scraper
 // -----------------------------
 async function fetchYekRialRows() {
-  const browser = await chromium.launch({ headless: YEKRIAL_HEADLESS });
+  const browser = await chromium.launch({
+    headless: YEKRIAL_HEADLESS,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--disable-blink-features=AutomationControlled",
+    ],
+  });
+
   const page = await browser.newPage({
     userAgent:
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    viewport: { width: 1366, height: 900 },
   });
 
   try {
@@ -173,19 +162,17 @@ async function fetchYekRialRows() {
       timeout: YEKRIAL_WAIT_MS,
     });
 
-    // give the page extra time to render
-    await page.waitForTimeout(Math.max(YEKRIAL_RENDER_WAIT_MS, 4000));
+    await page.waitForTimeout(YEKRIAL_RENDER_WAIT_MS);
 
-    // optional extra scroll to trigger lazy rendering
+    // small interaction helps some lazy-loaded UIs
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(1200);
     await page.evaluate(() => window.scrollTo(0, 0));
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(800);
 
     const extracted = await page.evaluate(() => {
       const results = [];
 
-      // try several selectors
       const cardNodes = [
         ...document.querySelectorAll("a.currency-card-link"),
         ...document.querySelectorAll("a[href*='/toman-rate/']"),
@@ -238,15 +225,15 @@ async function fetchYekRialRows() {
     if (!extracted.length) {
       const debug = await page.evaluate(() => ({
         title: document.title,
-        bodyText: (document.body?.innerText || "").slice(0, 2000),
+        sample: (document.body?.innerText || "").slice(0, 1200),
         links: Array.from(document.querySelectorAll("a"))
           .map((a) => a.getAttribute("href"))
           .filter(Boolean)
-          .slice(0, 50),
+          .slice(0, 40),
       }));
 
       throw new Error(
-        `No currency cards found. Title: ${debug.title}. Sample body: ${debug.bodyText}`
+        `No currency cards found. Title: ${debug.title}. Sample: ${debug.sample}`
       );
     }
 
@@ -293,6 +280,7 @@ async function fetchYekRialRows() {
     await browser.close().catch(() => {});
   }
 }
+
 // -----------------------------
 // Runner + cache
 // -----------------------------
@@ -302,9 +290,22 @@ let isRunning = false;
 
 async function runOnce(force = false) {
   const age = nowMs() - lastFetchMs;
-  if (!force && lastRun.ok && age < CACHE_TTL_MS) return lastRun;
 
-  if (isRunning) return lastRun;
+  if (!force && lastRun.ok && age < CACHE_TTL_MS) {
+    return {
+      ...lastRun,
+      cached: true,
+      cache_age_ms: age,
+    };
+  }
+
+  if (isRunning) {
+    return {
+      ...lastRun,
+      busy: true,
+    };
+  }
+
   isRunning = true;
 
   try {
@@ -318,7 +319,12 @@ async function runOnce(force = false) {
       count: result.count,
     };
     lastFetchMs = nowMs();
-    return lastRun;
+
+    return {
+      ...lastRun,
+      cached: false,
+      cache_age_ms: 0,
+    };
   } catch (e) {
     lastRun = {
       ok: false,
@@ -336,7 +342,7 @@ async function runOnce(force = false) {
 // Routes
 // -----------------------------
 app.get("/", (_req, res) => {
-  res.type("text/plain").send("yekrial-to-sheets running ✅");
+  res.type("text/plain").send("yekrial-to-sheets running");
 });
 
 app.get("/health", (_req, res) => {
@@ -345,14 +351,15 @@ app.get("/health", (_req, res) => {
     service: "yekrial-to-sheets",
     worksheet: WORKSHEET_TITLE,
     yekrial_url: YEKRIAL_URL,
-    cron: CRON_EXPR,
     cache_ttl_ms: CACHE_TTL_MS,
+    run_once: RUN_ONCE,
     lastRun,
   });
 });
 
 app.get("/run", async (req, res) => {
   const force = req.query.force === "1" || req.query.force === "true";
+
   try {
     const out = await runOnce(force);
     res.json({ ok: true, ...out });
@@ -362,21 +369,29 @@ app.get("/run", async (req, res) => {
 });
 
 // -----------------------------
-// Scheduler
+// Start / one-shot mode
 // -----------------------------
-cron.schedule(CRON_EXPR, async () => {
-  try {
-    await runOnce(false);
-    console.log("✅ Sheet updated:", lastRun);
-  } catch (e) {
-    console.error("❌ Update failed:", e?.message || e);
+async function main() {
+  if (RUN_ONCE) {
+    try {
+      const out = await runOnce(true);
+      console.log("Run-once completed:", out);
+      process.exit(0);
+    } catch (e) {
+      console.error("Run-once failed:", e?.message || e);
+      process.exit(1);
+    }
+    return;
   }
-});
 
-// -----------------------------
-// Start server
-// -----------------------------
-app.listen(PORT, () => {
-  console.log(`yekrial-to-sheets running on port ${PORT}`);
-  console.log("Manual run: /run?force=1");
+  app.listen(PORT, () => {
+    console.log(`yekrial-to-sheets running on port ${PORT}`);
+    console.log("Health: /health");
+    console.log("Manual run: /run?force=1");
+  });
+}
+
+main().catch((e) => {
+  console.error("Startup failed:", e?.message || e);
+  process.exit(1);
 });
