@@ -349,7 +349,7 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "yekrial-to-sheets",
-    worksheet: WORKSHEET_TITLE,
+    worksheet: YekRialRates,
     yekrial_url: YEKRIAL_URL,
     cache_ttl_ms: CACHE_TTL_MS,
     run_once: RUN_ONCE,
