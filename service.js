@@ -14,7 +14,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 
 const SHEET_ID = process.env.SHEET_ID || "";
-const WORKSHEET_TITLE = process.env.WORKSHEET_TITLE || "YekRialRates";
+const WORKSHEET_TITLE = process.env.WORKSHEET_TITLE || "YekRial";
 const SA_B64 = process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 || "";
 
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 15 * 60_000); // default 15 min
