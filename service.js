@@ -1,4 +1,23 @@
-// service.js — yekrial.com → Google Sheets (optimized for low usage on Railway)
+// service.js — yekrial.com → Google Sheets (optimized for Railway, no base64 env)
+//
+// Required Railway env vars:
+//   SHEET_ID
+//   GOOGLE_SERVICE_ACCOUNT_JSON
+//
+// Optional:
+//   PORT=3000
+//   WORKSHEET_TITLE=YekRial
+//   CACHE_TTL_MS=900000
+//   YEKRIAL_URL=https://yekrial.com
+//   YEKRIAL_HEADLESS=1
+//   YEKRIAL_WAIT_MS=30000
+//   YEKRIAL_RENDER_WAIT_MS=5000
+//   RUN_ONCE=0
+//
+// Routes:
+//   GET /
+//   GET /health
+//   GET /run?force=1
 
 import "dotenv/config";
 import express from "express";
@@ -15,16 +34,13 @@ const PORT = Number(process.env.PORT || 3000);
 
 const SHEET_ID = process.env.SHEET_ID || "";
 const WORKSHEET_TITLE = process.env.WORKSHEET_TITLE || "YekRial";
-const SA_B64 = process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 || "";
+const SERVICE_ACCOUNT_JSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || "";
 
-const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 15 * 60_000); // default 15 min
+const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 15 * 60_000);
 const YEKRIAL_URL = process.env.YEKRIAL_URL || "https://yekrial.com";
 const YEKRIAL_HEADLESS = String(process.env.YEKRIAL_HEADLESS || "1") === "1";
 const YEKRIAL_WAIT_MS = Number(process.env.YEKRIAL_WAIT_MS || 30_000);
 const YEKRIAL_RENDER_WAIT_MS = Number(process.env.YEKRIAL_RENDER_WAIT_MS || 5_000);
-
-// if RUN_ONCE=1, app runs a single scrape/write and exits.
-// useful later if you want scheduled jobs instead of always-on server.
 const RUN_ONCE = String(process.env.RUN_ONCE || "0") === "1";
 
 // -----------------------------
@@ -59,20 +75,15 @@ const METAL_SYMBOLS = new Set(["XAU", "XAG", "GOLD", "SILVER"]);
 // Google Sheets auth + write
 // -----------------------------
 function loadServiceAccountFromEnv() {
-  if (!SA_B64) throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 in env");
-
-  let jsonText = "";
-  try {
-    jsonText = Buffer.from(SA_B64, "base64").toString("utf8");
-  } catch {
-    throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 is not valid base64");
+  if (!SERVICE_ACCOUNT_JSON) {
+    throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON in env");
   }
 
   let creds;
   try {
-    creds = JSON.parse(jsonText);
+    creds = JSON.parse(SERVICE_ACCOUNT_JSON);
   } catch {
-    throw new Error("Decoded service account JSON is invalid");
+    throw new Error("Service account JSON invalid");
   }
 
   if (!creds.client_email || !creds.private_key) {
@@ -91,7 +102,9 @@ function makeJwtAuth(creds) {
 }
 
 async function getSheet() {
-  if (!SHEET_ID) throw new Error("Missing SHEET_ID in env");
+  if (!SHEET_ID) {
+    throw new Error("Missing SHEET_ID in env");
+  }
 
   const creds = loadServiceAccountFromEnv();
   const auth = makeJwtAuth(creds);
@@ -100,7 +113,9 @@ async function getSheet() {
   await doc.loadInfo();
 
   const sheet = doc.sheetsByTitle[WORKSHEET_TITLE] || doc.sheetsByIndex[0];
-  if (!sheet) throw new Error(`Worksheet not found: ${WORKSHEET_TITLE}`);
+  if (!sheet) {
+    throw new Error(`Worksheet not found: ${WORKSHEET_TITLE}`);
+  }
 
   return sheet;
 }
@@ -164,7 +179,6 @@ async function fetchYekRialRows() {
 
     await page.waitForTimeout(YEKRIAL_RENDER_WAIT_MS);
 
-    // small interaction helps some lazy-loaded UIs
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     await page.waitForTimeout(1200);
     await page.evaluate(() => window.scrollTo(0, 0));
@@ -185,6 +199,7 @@ async function fetchYekRialRows() {
 
         const codeMatch = href.match(/\/toman-rate\/([A-Z0-9_-]{2,15})/i);
         if (!codeMatch) return;
+
         const symbol = String(codeMatch[1]).toUpperCase();
 
         const nums = Array.from(
@@ -192,6 +207,7 @@ async function fetchYekRialRows() {
         ).map((m) => m[0]);
 
         let priceText = nums.find((s) => s.includes(",")) || "";
+
         if (!priceText && nums.length) {
           priceText =
             nums
@@ -243,6 +259,7 @@ async function fetchYekRialRows() {
       .map((x) => {
         const symbol = String(x.symbol || "").toUpperCase();
         const price = typeof x.price === "number" ? x.price : num(x.price);
+
         if (!symbol || price === null) return null;
 
         let group = "fiat";
