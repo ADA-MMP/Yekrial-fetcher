@@ -1,23 +1,5 @@
-// service.js — yekrial.com → Google Sheets (optimized for Railway, no base64 env)
-//
-// Required Railway env vars:
-//   SHEET_ID
-//   GOOGLE_SERVICE_ACCOUNT_JSON
-//
-// Optional:
-//   PORT=3000
-//   WORKSHEET_TITLE=YekRial
-//   CACHE_TTL_MS=900000
-//   YEKRIAL_URL=https://yekrial.com
-//   YEKRIAL_HEADLESS=1
-//   YEKRIAL_WAIT_MS=30000
-//   YEKRIAL_RENDER_WAIT_MS=5000
-//   RUN_ONCE=0
-//
-// Routes:
-//   GET /
-//   GET /health
-//   GET /run?force=1
+// service.js — yekrial.com → Google Sheets
+// Optimized for Railway, no base64 env, with fallback body-text parser
 
 import "dotenv/config";
 import express from "express";
@@ -33,7 +15,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 
 const SHEET_ID = process.env.SHEET_ID || "";
-const WORKSHEET_TITLE = process.env.WORKSHEET_TITLE || "YekRial";
+const WORKSHEET_TITLE = process.env.WORKSHEET_TITLE || "YekRialRates";
 const SERVICE_ACCOUNT_JSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || "";
 
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 15 * 60_000);
@@ -112,7 +94,8 @@ async function getSheet() {
   const doc = new GoogleSpreadsheet(SHEET_ID, auth);
   await doc.loadInfo();
 
-  const sheet = doc.sheetsByTitle[WORKSHEET_TITLE] || doc.sheetsByIndex[0];
+  const sheet = doc.sheetsByTitle[WORKSHEET_TITLE];
+
   if (!sheet) {
     throw new Error(`Worksheet not found: ${WORKSHEET_TITLE}`);
   }
@@ -151,7 +134,7 @@ async function writeRowsToSheet(rows) {
 }
 
 // -----------------------------
-// Scraper
+// YekRial scraper
 // -----------------------------
 async function fetchYekRialRows() {
   const browser = await chromium.launch({
@@ -187,52 +170,100 @@ async function fetchYekRialRows() {
     const extracted = await page.evaluate(() => {
       const results = [];
 
+      // METHOD 1: old selector-based extraction
       const cardNodes = [
         ...document.querySelectorAll("a.currency-card-link"),
         ...document.querySelectorAll("a[href*='/toman-rate/']"),
       ];
 
-      cardNodes.forEach((card) => {
-        const href = card.getAttribute("href") || "";
-        const text = (card.innerText || card.textContent || "").trim();
-        if (!href || !text) return;
+      if (cardNodes.length) {
+        cardNodes.forEach((card) => {
+          const href = card.getAttribute("href") || "";
+          const text = (card.innerText || card.textContent || "").trim();
 
-        const codeMatch = href.match(/\/toman-rate\/([A-Z0-9_-]{2,15})/i);
-        if (!codeMatch) return;
+          if (!href || !text) return;
 
-        const symbol = String(codeMatch[1]).toUpperCase();
+          const codeMatch = href.match(/\/toman-rate\/([A-Z0-9_-]{2,15})/i);
+          if (!codeMatch) return;
 
-        const nums = Array.from(
-          text.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?/g)
-        ).map((m) => m[0]);
+          const symbol = String(codeMatch[1]).toUpperCase();
 
-        let priceText = nums.find((s) => s.includes(",")) || "";
+          const nums = Array.from(
+            text.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?/g)
+          ).map((m) => m[0]);
 
-        if (!priceText && nums.length) {
-          priceText =
-            nums
-              .map((s) => ({ s, n: Number(s.replace(/,/g, "")) }))
-              .filter((x) => Number.isFinite(x.n))
-              .sort((a, b) => b.n - a.n)[0]?.s || "";
+          let priceText = nums.find((s) => s.includes(",")) || "";
+
+          if (!priceText && nums.length) {
+            priceText =
+              nums
+                .map((s) => ({ s, n: Number(s.replace(/,/g, "")) }))
+                .filter((x) => Number.isFinite(x.n))
+                .sort((a, b) => b.n - a.n)[0]?.s || "";
+          }
+
+          if (!priceText) return;
+
+          const price = Number(priceText.replace(/,/g, ""));
+          if (!Number.isFinite(price)) return;
+
+          const faMatch = text.match(/[\u0600-\u06FF][\u0600-\u06FF\s‌]{2,}/);
+          const name_fa = faMatch ? faMatch[0].trim() : symbol;
+
+          const changeMatch = text.match(/[-+−]\s*\d+(?:\.\d+)?\s*%/);
+          const change = changeMatch
+            ? changeMatch[0].replace(/\s+/g, "").replace("−", "-")
+            : "0";
+
+          results.push({
+            symbol,
+            name_fa,
+            price,
+            change,
+          });
+        });
+      }
+
+      // METHOD 2: fallback parser from body text
+      if (!results.length) {
+        const text = document.body?.innerText || "";
+        const lines = text
+          .split(/\n+/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+
+        for (let i = 0; i < lines.length; i++) {
+          const name_fa = lines[i];
+          const symbol = lines[i + 1];
+
+          if (!/^[A-Z]{3,6}$/.test(symbol || "")) continue;
+
+          const nextLines = lines.slice(i, i + 8);
+          const joined = nextLines.join("\n");
+
+          const priceMatch = joined.match(/([\d,]+)\s*تومان/);
+          if (!priceMatch) continue;
+
+          const price = Number(priceMatch[1].replace(/,/g, ""));
+          if (!Number.isFinite(price)) continue;
+
+          const changeMatch = joined.match(/[-+−]\s*\d+(?:\.\d+)?\s*%/);
+          const change = changeMatch
+            ? changeMatch[0].replace(/\s+/g, "").replace("−", "-")
+            : "0";
+
+          results.push({
+            symbol: symbol.toUpperCase(),
+            name_fa,
+            price,
+            change,
+          });
         }
-
-        if (!priceText) return;
-
-        const price = Number(priceText.replace(/,/g, ""));
-        if (!Number.isFinite(price)) return;
-
-        const faMatch = text.match(/[\u0600-\u06FF][\u0600-\u06FF\s‌]{2,}/);
-        const name_fa = faMatch ? faMatch[0].trim() : symbol;
-
-        const changeMatch = text.match(/[-+]\s*\d+(?:\.\d+)?\s*%/);
-        const change = changeMatch ? changeMatch[0].replace(/\s+/g, "") : "0";
-
-        results.push({ symbol, name_fa, price, change });
-      });
+      }
 
       const seen = new Set();
       return results.filter((r) => {
-        if (seen.has(r.symbol)) return false;
+        if (!r.symbol || seen.has(r.symbol)) return false;
         seen.add(r.symbol);
         return true;
       });
@@ -241,7 +272,7 @@ async function fetchYekRialRows() {
     if (!extracted.length) {
       const debug = await page.evaluate(() => ({
         title: document.title,
-        sample: (document.body?.innerText || "").slice(0, 1200),
+        sample: (document.body?.innerText || "").slice(0, 2000),
         links: Array.from(document.querySelectorAll("a"))
           .map((a) => a.getAttribute("href"))
           .filter(Boolean)
@@ -249,7 +280,7 @@ async function fetchYekRialRows() {
       }));
 
       throw new Error(
-        `No currency cards found. Title: ${debug.title}. Sample: ${debug.sample}`
+        `No rates parsed. Title: ${debug.title}. Sample: ${debug.sample}`
       );
     }
 
@@ -281,7 +312,7 @@ async function fetchYekRialRows() {
       .filter(Boolean);
 
     if (!rows.length) {
-      throw new Error("Cards found, but no valid rows parsed");
+      throw new Error("Rates found, but no valid rows parsed");
     }
 
     const groupOrder = { fiat: 1, metal: 2, crypto: 3, unknown: 9 };
@@ -374,14 +405,28 @@ app.get("/health", (_req, res) => {
   });
 });
 
+app.head("/run", (_req, res) => {
+  res.status(204).end();
+});
+
 app.get("/run", async (req, res) => {
   const force = req.query.force === "1" || req.query.force === "true";
 
+  if (!force) {
+    return res.status(400).json({
+      ok: false,
+      error: "Use /run?force=1",
+    });
+  }
+
   try {
-    const out = await runOnce(force);
+    const out = await runOnce(true);
     res.json({ ok: true, ...out });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e?.message || "unknown" });
+    res.status(500).json({
+      ok: false,
+      error: e?.message || "unknown",
+    });
   }
 });
 
