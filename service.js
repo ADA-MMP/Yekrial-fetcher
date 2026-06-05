@@ -1,5 +1,5 @@
 // service.js — yekrial.com → Google Sheets
-// Optimized for Railway, no base64 env, with fallback body-text parser
+// Debug version for Railway logs
 
 import "dotenv/config";
 import express from "express";
@@ -91,8 +91,10 @@ async function getSheet() {
   const creds = loadServiceAccountFromEnv();
   const auth = makeJwtAuth(creds);
 
+  console.log("Google doc loadInfo started");
   const doc = new GoogleSpreadsheet(SHEET_ID, auth);
   await doc.loadInfo();
+  console.log("Google doc loaded");
 
   const sheet = doc.sheetsByTitle[WORKSHEET_TITLE];
 
@@ -104,6 +106,8 @@ async function getSheet() {
 }
 
 async function writeRowsToSheet(rows) {
+  console.log("writeRowsToSheet started. rows =", rows.length);
+
   const sheet = await getSheet();
 
   const wantedHeaders = [
@@ -119,7 +123,10 @@ async function writeRowsToSheet(rows) {
     "updated_at",
   ];
 
+  console.log("clearing sheet");
   await sheet.clear();
+
+  console.log("setting header row");
   await sheet.setHeaderRow(wantedHeaders);
   await sheet.loadHeaderRow();
 
@@ -127,8 +134,11 @@ async function writeRowsToSheet(rows) {
   const finalRows = rows.map((r) => ({ ...r, updated_at }));
 
   if (finalRows.length) {
+    console.log("adding rows to sheet:", finalRows.length);
     await sheet.addRows(finalRows);
   }
+
+  console.log("writeRowsToSheet finished:", updated_at);
 
   return { count: finalRows.length, updated_at };
 }
@@ -137,6 +147,9 @@ async function writeRowsToSheet(rows) {
 // YekRial scraper
 // -----------------------------
 async function fetchYekRialRows() {
+  console.log("fetchYekRialRows started");
+  console.log("launching browser");
+
   const browser = await chromium.launch({
     headless: YEKRIAL_HEADLESS,
     args: [
@@ -155,22 +168,29 @@ async function fetchYekRialRows() {
   });
 
   try {
+    console.log("opening yekrial:", YEKRIAL_URL);
+
     await page.goto(YEKRIAL_URL, {
       waitUntil: "domcontentloaded",
       timeout: YEKRIAL_WAIT_MS,
     });
 
+    console.log("page domcontentloaded");
+
     await page.waitForTimeout(YEKRIAL_RENDER_WAIT_MS);
+    console.log("page render wait finished");
 
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     await page.waitForTimeout(1200);
+
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.waitForTimeout(800);
+
+    console.log("starting page.evaluate parser");
 
     const extracted = await page.evaluate(() => {
       const results = [];
 
-      // METHOD 1: old selector-based extraction
       const cardNodes = [
         ...document.querySelectorAll("a.currency-card-link"),
         ...document.querySelectorAll("a[href*='/toman-rate/']"),
@@ -224,7 +244,6 @@ async function fetchYekRialRows() {
         });
       }
 
-      // METHOD 2: fallback parser from body text
       if (!results.length) {
         const text = document.body?.innerText || "";
         const lines = text
@@ -269,6 +288,8 @@ async function fetchYekRialRows() {
       });
     });
 
+    console.log("page.evaluate finished. extracted =", extracted.length);
+
     if (!extracted.length) {
       const debug = await page.evaluate(() => ({
         title: document.title,
@@ -311,6 +332,8 @@ async function fetchYekRialRows() {
       })
       .filter(Boolean);
 
+    console.log("parsed rows:", rows.length);
+
     if (!rows.length) {
       throw new Error("Rates found, but no valid rows parsed");
     }
@@ -324,6 +347,7 @@ async function fetchYekRialRows() {
 
     return rows;
   } finally {
+    console.log("closing page/browser");
     await page.close().catch(() => {});
     await browser.close().catch(() => {});
   }
@@ -337,9 +361,12 @@ let lastFetchMs = 0;
 let isRunning = false;
 
 async function runOnce(force = false) {
+  console.log("runOnce started. force =", force);
+
   const age = nowMs() - lastFetchMs;
 
   if (!force && lastRun.ok && age < CACHE_TTL_MS) {
+    console.log("returning cached result. age =", age);
     return {
       ...lastRun,
       cached: true,
@@ -348,6 +375,7 @@ async function runOnce(force = false) {
   }
 
   if (isRunning) {
+    console.log("run skipped because busy");
     return {
       ...lastRun,
       busy: true,
@@ -357,8 +385,13 @@ async function runOnce(force = false) {
   isRunning = true;
 
   try {
+    console.log("launching browser...");
     const rows = await fetchYekRialRows();
+    console.log("rows fetched:", rows.length);
+
+    console.log("writing sheet...");
     const result = await writeRowsToSheet(rows);
+    console.log("sheet written.");
 
     lastRun = {
       ok: true,
@@ -366,7 +399,10 @@ async function runOnce(force = false) {
       updated_at: result.updated_at,
       count: result.count,
     };
+
     lastFetchMs = nowMs();
+
+    console.log("finished successfully");
 
     return {
       ...lastRun,
@@ -374,12 +410,15 @@ async function runOnce(force = false) {
       cache_age_ms: 0,
     };
   } catch (e) {
+    console.error("runOnce error:", e?.message || e);
+
     lastRun = {
       ok: false,
       error: e?.message || "unknown",
       updated_at: null,
       count: 0,
     };
+
     throw e;
   } finally {
     isRunning = false;
@@ -406,13 +445,18 @@ app.get("/health", (_req, res) => {
 });
 
 app.head("/run", (_req, res) => {
+  console.log("HEAD /run ignored");
   res.status(204).end();
 });
 
 app.get("/run", async (req, res) => {
+  console.log("RUN REQUEST:", req.query);
+
   const force = req.query.force === "1" || req.query.force === "true";
 
   if (!force) {
+    console.log("RUN rejected: missing force=1");
+
     return res.status(400).json({
       ok: false,
       error: "Use /run?force=1",
@@ -443,6 +487,7 @@ async function main() {
       console.error("Run-once failed:", e?.message || e);
       process.exit(1);
     }
+
     return;
   }
 
