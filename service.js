@@ -1884,132 +1884,104 @@ app.head(
 // ============================================================
 // MANUAL / SCHEDULED SCRAPE
 //
-// Required URL:
-//
+// URL:
 // /run?force=1
+//
+// Respond immediately.
+// Scraping continues in Railway in the background.
 // ============================================================
 
 app.get(
   "/run",
-  async (req, res) => {
+  (req, res) => {
 
     console.log(
       "RUN REQUEST:",
       req.query
     );
 
-
     const force =
       req.query.force === "1" ||
       req.query.force === "true";
 
 
-    // ========================================================
-    // FORCE PARAMETER REQUIRED
-    // ========================================================
-
+    // force=1 is required
     if (!force) {
 
       console.log(
         "RUN rejected: missing force=1"
       );
 
-
       return res
         .status(400)
         .json({
-
-          ok:
-            false,
-
-          error:
-            "Use /run?force=1",
+          ok: false,
+          error: "Use /run?force=1",
         });
     }
 
 
-    // ========================================================
-    // DON'T START NEW WORK DURING RAILWAY SHUTDOWN
-    // ========================================================
-
+    // Do not start while Railway is shutting down
     if (shuttingDown) {
 
       return res
         .status(503)
         .json({
-
-          ok:
-            false,
-
-          error:
-            "Service is shutting down",
+          ok: false,
+          error: "Service is shutting down",
         });
     }
 
 
-    try {
+    // Do not allow two Playwright runs at the same time
+    if (isRunning) {
 
-      const out =
-        await runOnce(
-          true
-        );
-
-
-      // ======================================================
-      // SCRAPER ALREADY RUNNING
-      // ======================================================
-
-      if (out.busy) {
-
-        return res
-          .status(409)
-          .json({
-
-            ok:
-              false,
-
-            ...out,
-
-            error:
-              "A scrape is already running",
-          });
-      }
+      return res
+        .status(409)
+        .json({
+          ok: false,
+          busy: true,
+          error: "A scrape is already running",
+        });
+    }
 
 
-      // ======================================================
-      // SUCCESS
-      // ======================================================
+    // ----------------------------------------------------------
+    // RESPOND TO CRON-JOB.ORG IMMEDIATELY
+    // ----------------------------------------------------------
 
-      return res.json({
-
-        ok:
-          true,
-
-        ...out,
+    res
+      .status(202)
+      .json({
+        ok: true,
+        accepted: true,
+        message: "Scrape started",
       });
 
 
-    } catch (e) {
+    // ----------------------------------------------------------
+    // RUN SCRAPER IN BACKGROUND
+    // ----------------------------------------------------------
 
-      // ======================================================
-      // FAILURE
-      // ======================================================
+    runOnce(true)
+      .then((out) => {
 
-      return res
-        .status(500)
-        .json({
+        console.log(
+          "Background scrape completed:",
+          out
+        );
 
-          ok:
-            false,
+      })
+      .catch((e) => {
 
-          error:
-            e?.message ||
-            "unknown",
-        });
-    }
+        console.error(
+          "Background scrape failed:",
+          e?.message || e
+        );
+
+      });
   }
 );
-
 
 // ============================================================
 // GRACEFUL SHUTDOWN
